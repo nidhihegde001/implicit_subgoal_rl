@@ -1,0 +1,1 @@
+srun --partition=GPU-shared --gpus=1 --cpus-per-task=4 --time=2:00:00 --pty /bin/bash
