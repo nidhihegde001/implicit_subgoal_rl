@@ -22,10 +22,13 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
     while sharing a single actor and temperature parameter.
     """
 
-    rng: Any
     network: Any
     config: Any = nonpytree_field()
     n_goals: int = nonpytree_field()
+
+
+    def _init_rng(self, seed=42):
+        return jax.random.PRNGKey(seed)
 
     def _select_actor_actions_and_logp(self, observations, rng):
         """Sample actions and log-probs from the actor."""
@@ -106,7 +109,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
             phase_mask = (batch['phases'] == g).astype(jnp.float32)  
 
             # MSE between q_agg and target, only accumulate where phase_mask==1
-            mse = (q_agg - target_q_g) ** 2
+            mse = (q_agg - jax.lax.stop_gradient(target_q_g)) ** 2
             # eps = 1e-8
             # loss_g = jnp.sum(mse * phase_mask)/(jnp.sum(phase_mask) + eps) # remove this (use to train all critics)
             loss_g = jnp.mean(mse)
@@ -133,6 +136,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
         info: Dict[str, Any] = {}
         obs = batch['states']
         B = obs.shape[0]
+        subgoal_weights = self.config.get('subgoal_weights', jnp.ones((1,self.n_goals)))
 
         rng, sample_rng = jax.random.split(rng)
         dist = self.network.select('actor')(obs, params=grad_params)
@@ -152,24 +156,24 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
         for g in range(self.n_goals):
             critic_name = f"critic_goal_{g}"
             qs = self.network.select(critic_name)(obs, actions=act_flat, params=grad_params)
-            if self.config['q_agg'] == 'min':
-                q_agg = jnp.min(qs, axis=0)
-            else:
-                q_agg = jnp.mean(qs, axis=0)
+            q_agg = jnp.mean(qs, axis=0) # take mean over ensembles
             q_vals_per_goal.append(q_agg)
         q_vals_per_goal = jnp.stack(q_vals_per_goal, axis=0)  # (G, B)
+        jax.debug.print("inside actor loss, q shape: ", q_vals_per_goal.shape)
 
         # Now pick per-sample q according to phase: q_per_sample[b] = q_vals_per_goal[phase[b], b]
-        idxs = jnp.arange(B)
-        phases = batch['phases'].astype(jnp.int32)
-        q_per_sample = q_vals_per_goal[phases, idxs]
+        # idxs = jnp.arange(B)
+        # phases = batch['phases'].astype(jnp.int32)
+        q_per_sample = subgoal_weights @ q_vals_per_goal # (B,)
+        
+        # q_per_sample = q_vals_per_goal[phases, idxs] # B
 
         temp = self.network.select('temp')()
         actor_loss = jnp.mean((temp * log_probs - q_per_sample) * batch.get('valid', 1.0))
 
         # Temperature loss (auto temp tuning)
         temp_param = self.network.select('temp')(params=grad_params)
-        entropy = -jax.lax.stop_gradient(log_probs * batch.get('valid', 1.0)).mean()
+        entropy = -jax.lax.stop_gradient(log_probs * batch.get('valid', 1.0))
         temp_loss = (temp_param * (entropy - self.config['target_entropy'])).mean()
 
         total_loss = actor_loss + temp_loss
@@ -187,7 +191,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
         info: Dict[str, Any] = {}
-        rng = rng if rng is not None else self.rng
+        rng = rng if rng is not None else self._init_rng()
         rng, actor_rng, critic_rng = jax.random.split(rng, 3)
 
         critic_loss_val, critic_info = self.critic_loss(batch, grad_params, critic_rng)
@@ -210,8 +214,8 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
             src_name = f'modules_critic_goal_{goal_idx}'
             params[target_name] = jax.tree_util.tree_map(
                 lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
-                self.network.params[src_name],
-                self.network.params[target_name],
+                network.params[src_name],
+                network.params[target_name],
             )
         return network.replace(params=freeze(params))
 
@@ -242,7 +246,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
     @jax.jit
     def sample_actions(self, observations, rng=None, deterministic=False):
         dist = self.network.select('actor')(observations)
-        rng = rng if rng is not None else self.rng
+        rng = rng if rng is not None else self._init_rng()
         if deterministic:
             if hasattr(dist, 'mode'):
                 return dist.mode()
@@ -327,10 +331,9 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
         params = unfreeze(network_params)
         for g in range(n_goals):
             params[f'modules_target_critic_goal_{g}'] = params[f'modules_critic_goal_{g}']
-        params = freeze(params)
+        network_params = freeze(params)
 
-
-        network = TrainState.create(network_def, network_params, tx=network_tx)
+        network = TrainState.create(network_def, params, tx=network_tx)
 
         config = dict(**config)
         config['action_dim'] = action_dim
@@ -338,7 +341,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
             # set target entropy w.r.t full action dim
             config['target_entropy'] = -float(full_action_dim) / 2
 
-        return cls(rng, network=network, config=flax.core.FrozenDict(**config), n_goals=n_goals)
+        return cls(network=network, config=flax.core.FrozenDict(**config), n_goals=n_goals)
 
 
 def get_config():
