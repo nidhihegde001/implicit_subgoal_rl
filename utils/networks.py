@@ -48,8 +48,7 @@ class MLP(nn.Module):
                 x = self.activations(x)
             if i == len(self.hidden_dims) - 2:
                 self.sow('intermediates', 'feature', x)
-        
-        print("MLP Out shape: ", x.shape)
+
         return x
 
 class MLPCond(nn.Module):

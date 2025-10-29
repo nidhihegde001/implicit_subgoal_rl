@@ -21,8 +21,8 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
     Multi-goal SAC agent that trains separate critic networks for each sub-goal
     while sharing a single actor and temperature parameter.
     """
-
     network: Any
+    rng: Any
     config: Any = nonpytree_field()
     n_goals: int = nonpytree_field()
 
@@ -54,7 +54,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
     def critic_loss(self, batch, grad_params, rng):
         """
         Compute critic losses for each goal and sum them (or return dict).
-        Each critic is trained only on samples whose `phases == goal_idx`.
+        Each critic is trained all on samples even when `phases != goal_idx` with the corresponding reward (-1,0).
         """
         info: Dict[str, Any] = {}
         B = batch['states'].shape[0]
@@ -105,13 +105,10 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
             else:
                 q_agg = jnp.mean(qs, axis=0)
 
-            # mask = 1 for samples whose phase == g, else 0
+            # mask = 1 for samples whose phase == g, else 0 (only used for logging)
             phase_mask = (batch['phases'] == g).astype(jnp.float32)  
 
-            # MSE between q_agg and target, only accumulate where phase_mask==1
             mse = (q_agg - jax.lax.stop_gradient(target_q_g)) ** 2
-            # eps = 1e-8
-            # loss_g = jnp.sum(mse * phase_mask)/(jnp.sum(phase_mask) + eps) # remove this (use to train all critics)
             loss_g = jnp.mean(mse)
 
             per_goal_losses.append(loss_g)
@@ -129,9 +126,9 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
 
     def actor_loss(self, batch, grad_params, rng):
         """
-        Actor loss: for each sample, the Q term is taken from the critic corresponding
-        to the sample's phase. We compute actions from actor, get their log-probs,
-        and evaluate all goal-critics to pick the per-sample critic by phase.
+        Actor loss: for each sample, average across all critic functions. 
+        We compute actions from actor, get their log-probs,
+        and evaluate all goal-critics to pick the per-sample critic.
         """
         info: Dict[str, Any] = {}
         obs = batch['states']
@@ -159,17 +156,10 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
             q_agg = jnp.mean(qs, axis=0) # take mean over ensembles
             q_vals_per_goal.append(q_agg)
         q_vals_per_goal = jnp.stack(q_vals_per_goal, axis=0)  # (G, B)
-        jax.debug.print("inside actor loss, q shape: ", q_vals_per_goal.shape)
-
-        # Now pick per-sample q according to phase: q_per_sample[b] = q_vals_per_goal[phase[b], b]
-        # idxs = jnp.arange(B)
-        # phases = batch['phases'].astype(jnp.int32)
-        q_per_sample = subgoal_weights @ q_vals_per_goal # (B,)
-        
-        # q_per_sample = q_vals_per_goal[phases, idxs] # B
+        q_per_sample = (subgoal_weights @ q_vals_per_goal).squeeze(0) # (1, B)
 
         temp = self.network.select('temp')()
-        actor_loss = jnp.mean((temp * log_probs - q_per_sample) * batch.get('valid', 1.0))
+        actor_loss = jnp.mean((temp * log_probs - jax.lax.stop_gradient(q_per_sample)) * batch.get('valid', 1.0))
 
         # Temperature loss (auto temp tuning)
         temp_param = self.network.select('temp')(params=grad_params)
@@ -330,10 +320,10 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
         # Copy critic params to their target counterparts
         params = unfreeze(network_params)
         for g in range(n_goals):
-            params[f'modules_target_critic_goal_{g}'] = params[f'modules_critic_goal_{g}']
+            params[f'modules_target_critic_goal_{g}'] = copy.deepcopy(params[f'modules_critic_goal_{g}'])
         network_params = freeze(params)
 
-        network = TrainState.create(network_def, params, tx=network_tx)
+        network = TrainState.create(network_def, network_params, tx=network_tx)
 
         config = dict(**config)
         config['action_dim'] = action_dim
@@ -341,7 +331,7 @@ class MultiGoalSACAgent(flax.struct.PyTreeNode):
             # set target entropy w.r.t full action dim
             config['target_entropy'] = -float(full_action_dim) / 2
 
-        return cls(network=network, config=flax.core.FrozenDict(**config), n_goals=n_goals)
+        return cls(network=network, rng=rng, config=flax.core.FrozenDict(**config), n_goals=n_goals)
 
 
 def get_config():

@@ -33,14 +33,16 @@ flags.DEFINE_string('project', 'implicit_subgoal_rl', 'Project name.')
 # flags.DEFINE_integer('online_steps', 1000000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 1000000, 'Replay buffer size.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
-flags.DEFINE_integer('num_init_steps', 100, 'Initial steps to fill RB')
-flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
-flags.DEFINE_integer('save_interval', -1, 'Save interval.')
+flags.DEFINE_integer('num_init_steps', 1000, 'Initial steps to fill RB')
+flags.DEFINE_integer('total_training_steps', 100000, 'Initial steps to fill RB')
+flags.DEFINE_integer('eval_interval', 10000, 'Evaluation interval.')
+flags.DEFINE_integer('save_interval', 50000, 'Save interval.')
+flags.DEFINE_integer('batch_size', 4096, 'batch size')
 # flags.DEFINE_integer('start_training', 5000, 'when does training start')
 # flags.DEFINE_integer('utd_ratio', 1, "update to data ratio")
 flags.DEFINE_float('discount', 0.99, 'discount factor')
 
-flags.DEFINE_integer('eval_episodes', 50, 'Number of evaluation episodes.')
+flags.DEFINE_integer('eval_episodes', 2, 'Number of evaluation episodes.')
 flags.DEFINE_integer('video_episodes', 0, 'Number of video episodes for each task.')
 flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 
@@ -64,8 +66,8 @@ class LoggingHelper:
         self.last_time = time.time()
 
     def log(self, data, prefix, step):
-        assert prefix in self.csv_loggers, prefix
-        self.csv_loggers[prefix].log(data, step=step)
+        # assert prefix in self.csv_loggers, prefix
+        # self.csv_loggers[prefix].log(data, step=step)
         self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
 
@@ -160,9 +162,9 @@ def main(_):
     # Hyperparameters
     # -------------------------------
     num_init_steps = FLAGS.num_init_steps       # Fill buffer with random actions first
-    total_training_steps = 200
-    batch_size = 256
-    update_after = num_init_steps  # Start gradient updates only after buffer has enough data
+    total_training_steps = FLAGS.total_training_steps
+    batch_size = FLAGS.batch_size
+    update_after = 0  # Start gradient updates only after buffer has enough data
     update_every = 1               # Train every environment step (can increase for speed)
 
     # -------------------------------
@@ -252,28 +254,29 @@ def main(_):
 
             # Perform 1 gradient update on critic + actor
             agent, loss_info = agent.update(batch)
+            # print(loss_info)
             if step % FLAGS.log_interval == 0:
-                # logger.log(loss_info, "agent info", step=log_step)
+                logger.log(loss_info, "agent info", step=log_step)
                 # print(loss_info)
-                for key, info in loss_info.items():
-                    logger.log(info, key, step=log_step)
-                loss_info = {}
+                # for key, info in loss_info.items():
+                #     logger.log(info, key, step=log_step)
+                # loss_info = {}
+            
+            if (FLAGS.eval_interval != 0 and step % FLAGS.eval_interval == 0):
+                eval_info, _, _ = evaluate(
+                    agent=agent,
+                    env=env,
+                    global_step=step,
+                    action_dim=act_dim,
+                    num_eval_episodes=FLAGS.eval_episodes,
+                    num_video_episodes=FLAGS.video_episodes,
+                    video_frame_skip=FLAGS.video_frame_skip,
+                )
+                logger.log(eval_info, "eval", step=log_step)
 
         # Reset environment if terminated
         obs = next_obs if not done else env.reset()
 
-        
-        if (FLAGS.eval_interval != 0 and step % FLAGS.eval_interval == 0):
-            eval_info, _, _ = evaluate(
-                agent=agent,
-                env=env,
-                global_step=step,
-                action_dim=act_dim,
-                num_eval_episodes=FLAGS.eval_episodes,
-                num_video_episodes=FLAGS.video_episodes,
-                video_frame_skip=FLAGS.video_frame_skip,
-            )
-            logger.log(eval_info, "eval", step=log_step)
 
         # # saving
         # if FLAGS.save_interval > 0 and step % FLAGS.save_interval == 0:

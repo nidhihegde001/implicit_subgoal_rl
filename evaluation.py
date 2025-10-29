@@ -58,96 +58,91 @@ def returns_to_go_from_indices(rewards, indices, discount=0.99):
     return [float(suffix[t]) for t in indices]
 
 
-def visualize_q_accuracy(time_series_data, scatter_data, global_step, suffix, dir_suffix, save_dir='./plots'):
-    if not scatter_data:
-        return
+def visualize_q_accuracy(time_series_data, global_step, suffix, dir_suffix, save_dir='./plots'):
+    # if not q_data or not mc_data: # (num_eval_episodes, len_trajectory, n_goals) -> values is a tuple (mc return, q_pred)
+    #     return
 
     save_dir = os.path.join(save_dir, 'q_accuracy_plots', dir_suffix)
     os.makedirs(save_dir, exist_ok=True)
     
     # Determine number of goals
-    n_goals = len(scatter_data[0]) if isinstance(scatter_data[0], list) else 1
-    
-    # Convert old format to new format if needed
-    if not isinstance(scatter_data[0], list):
-        scatter_data = [[s] for s in scatter_data]  # (1 subgoal)
-    
-    scatter_data = np.array(scatter_data).T
-    print("scatter data shape: ", scatter_data.shape) # (G, T)
-    fig, axes = plt.subplots(2, 1, figsize=(8, 10), constrained_layout=True)
-    reward_desc = "MC return-to-go (episode end)"
-    fig.suptitle(f'Q-Function Accuracy Analysis ({reward_desc})\nStep {global_step} ({suffix})', fontsize=12)
+    n_goals = len(time_series_data[0]['q_preds'][0])
+    print("Num subgoals: ", n_goals)
+    fig, axes = plt.subplots(n_goals, 1, figsize=(10, 20), constrained_layout=True)
 
-    # Subplot 1: per-episode time series
-    ax1 = axes[0]
-    for i, episode in enumerate(time_series_data):
-        timesteps = np.arange(len(episode['q_preds']))
-        color = plt.cm.coolwarm(i / max(1, len(time_series_data) - 1))
-        if len(timesteps) == 0:
-            continue
-        ax1.plot(timesteps, episode['q_preds'], marker='s', linestyle='--',
-                 markersize=4, color=color, alpha=0.5, label='Q-Pred' if i == 0 else None)
-        ax1.plot(timesteps, episode['mc_returns'], marker='^', linestyle='-',
-                 markersize=4, color=color, alpha=0.5, label='MC Return' if i == 0 else None)
+    for g in range(n_goals):
+        
+        reward_desc = "MC return-to-go (episode end)"
+        fig.suptitle(f'Q-Function Accuracy Analysis ({reward_desc})\nStep {global_step}', fontsize=12)
+        # Subplot 1: per-episode time series
+        ax1 = axes[g]
+        for i, episode in enumerate(time_series_data):
+            # print("q preds shape: ", episode['q_preds'].shape)
+            timesteps = np.arange(episode['q_preds'].shape[0])
+            color = plt.cm.coolwarm(i / max(1, len(time_series_data) - 1))
+            if len(timesteps) == 0:
+                continue
+            ax1.plot(timesteps, episode['q_preds'][:, g].flatten(), marker='s', linestyle='--',
+                    markersize=4, color=color, alpha=0.5, label='Q-Pred' if i == 0 else None)
+            ax1.plot(timesteps, episode['mc_returns'].flatten(), marker='^', linestyle='-',
+                    markersize=4, color=color, alpha=0.5, label='MC Return' if i == 0 else None)
 
-    ax1.set_title('Q-Value vs MC Return at Decision Points')
-    ax1.set_xlabel('Decision Point Index (per episode)')
-    ax1.set_ylabel('Value')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+        ax1.set_title(f'(Goal ID: {g})')
+        ax1.set_xlabel('Decision Point Index (per episode)')
+        ax1.set_ylabel('Value')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
 
-    # Subplot 2: scatter correlation for all goals
-    ax2 = axes[1]
-    
-    # Colors for different goals
-    colors = plt.cm.tab10(np.linspace(0, 1, n_goals))
-    
-    all_q_preds = []
-    all_mc_returns = []
-    
-    for goal_idx, goal_data in enumerate(scatter_data):
-        if not goal_data:
-            continue
+        # # Subplot 2: scatter correlation for all goals
+        # ax2 = axes[1]
+        
+        # # Colors for different goals
+        # colors = plt.cm.tab10(np.linspace(0, 1, n_goals))
+        
+        # all_q_preds = []
+        # all_mc_returns = []
+
+        
+        # for goal_idx, goal_data in enumerate(scatter_data):
+        #     # Extract Q predictions and MC returns for this goal
+        #     q_preds = [d[0] for d in goal_data]
+        #     mc_returns = [d[1] for d in goal_data]
             
-        # Extract Q predictions and MC returns for this goal
-        q_preds = [d[0] for d in goal_data]
-        mc_returns = [d[1] for d in goal_data]
+        #     all_q_preds.extend(q_preds)
+        #     all_mc_returns.extend(mc_returns)
+            
+        #     # Plot scatter for this goal
+        #     ax2.scatter(q_preds, mc_returns, alpha=0.6, s=20, 
+        #             edgecolors='black', linewidth=0.3, 
+        #             color=colors[goal_idx],
+        #             label=f'Goal {goal_idx}' if n_goals > 1 else None)
         
-        all_q_preds.extend(q_preds)
-        all_mc_returns.extend(mc_returns)
-        
-        # Plot scatter for this goal
-        ax2.scatter(q_preds, mc_returns, alpha=0.6, s=20, 
-                   edgecolors='black', linewidth=0.3, 
-                   color=colors[goal_idx],
-                   label=f'Goal {goal_idx}' if n_goals > 1 else None)
-    
-    # Plot diagonal reference line
-    if all_q_preds and all_mc_returns:
-        min_val = min(min(all_q_preds), min(all_mc_returns))
-        max_val = max(max(all_q_preds), max(all_mc_returns))
-        ax2.plot([min_val, max_val], [min_val, max_val], '--', 
-                alpha=0.75, linewidth=2, color='gray', label='y = x')
+        # # Plot diagonal reference line
+        # if all_q_preds and all_mc_returns:
+        #     min_val = min(min(all_q_preds), min(all_mc_returns))
+        #     max_val = max(max(all_q_preds), max(all_mc_returns))
+        #     ax2.plot([min_val, max_val], [min_val, max_val], '--', 
+        #             alpha=0.75, linewidth=2, color='gray', label='y = x')
 
-    ax2.set_title('Predicted Q vs MC Return (All Episodes)')
-    ax2.set_xlabel('Predicted Q-Value')
-    ax2.set_ylabel('MC Return')
-    if n_goals > 1:
-        ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.set_aspect('equal', 'box')
+        # ax2.set_title('Predicted Q vs MC Return (All Episodes)')
+        # ax2.set_xlabel('Predicted Q-Value')
+        # ax2.set_ylabel('MC Return')
+        # if n_goals > 1:
+        #     ax2.legend()
+        # ax2.grid(True, alpha=0.3)
+        # ax2.set_aspect('equal', 'box')
 
-    # Calculate and display correlation
-    if len(all_q_preds) > 1:
-        correlation = np.corrcoef(all_q_preds, all_mc_returns)[0, 1]
-        ax2.text(0.05, 0.95, f'Overall Correlation: {correlation:.3f}', 
-                transform=ax2.transAxes,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+        # # Calculate and display correlation
+        # if len(all_q_preds) > 1:
+        #     correlation = np.corrcoef(all_q_preds, all_mc_returns)[0, 1]
+        #     ax2.text(0.05, 0.95, f'Overall Correlation: {correlation:.3f}', 
+        #             transform=ax2.transAxes,
+        #             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
 
     save_path = os.path.join(save_dir, f'q_accuracy_step_{global_step}_{suffix}.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"Q-function accuracy plot saved to: {save_path}")
+        # print(f"Q-function accuracy plot saved to: {save_path}")
 
 def evaluate(
     agent,
@@ -179,8 +174,9 @@ def evaluate(
     Returns:
         A tuple containing the statistics, trajectories, and rendered videos.
     """
+    max_len_episode = 20 # initial trajectories never complete (so constraining trajectory lengths during eval)
     if actor_fn is None:
-        suffix = "SDE"
+        suffix = ""
         actor_fn = agent.sample_actions
     else:
         suffix = "ODE"
@@ -190,9 +186,11 @@ def evaluate(
     stats = defaultdict(list)
     renders = []
     
-    scatter_data = []   # list of (q_pred, mc_return) across all episodes
+    q_data = []   # list of q_pred across all episodes # (E, G)
+    mc_data = [] # list of mc_return across all episodes # (E, 1)
     time_series_data = []  # per-episode lists
     for i in trange(num_eval_episodes + num_video_episodes):
+        print("Evaluating episode ", i)
         traj = defaultdict(list)
         should_render = i >= num_eval_episodes
 
@@ -209,12 +207,11 @@ def evaluate(
         # action_chunk_lens = defaultdict(int)
 
         # action_queue = []
-        while not done:
+        while not done and step < max_len_episode:
             # if len(action_queue) == 0:
             obs_array = np.concatenate([v.ravel() for v in obs.values()])
             action = actor_fn(obs_array) #, temperature=eval_temperature)
-            # print("Action shape: ", action.shape)
-            action = np.array(action).reshape(-1, action_dim) # (B, action_dim)
+            # print("action shape: ", action.shape)
             # action_chunk_len = action.shape[0]
             # for a in action:
             #     action_queue.append(a)
@@ -223,7 +220,7 @@ def evaluate(
                 critic_name = f"target_critic_goal_{g}"
                 # mean of ensembles
                 q_pred = jnp.mean(agent.network.select(critic_name)(jax.device_put(obs_array[np.newaxis, ...]),  # add batch dimension
-                                            jax.device_put(action)))
+                                            jax.device_put(action[np.newaxis, ...])))
                 q_pred_g.append(float(q_pred))
                 
             q_preds_at_decisions.append(q_pred_g) # weight these critic preds with w_is
@@ -256,10 +253,12 @@ def evaluate(
 
         mc_returns = returns_to_go_from_indices(rewards, decision_indices, discount=0.99)
         time_series_data.append({
-            'q_preds': q_preds_at_decisions,
-            'mc_returns': mc_returns,
+            'q_preds': np.array(q_preds_at_decisions), # (T, G)
+            'mc_returns': np.array(mc_returns), # (T,)
         })
-        scatter_data.extend(list(zip(q_preds_at_decisions, mc_returns)))
+
+        # q_data.append(q_preds_at_decisions)
+        # mc_data.extend(mc_returns)
 
         if i < num_eval_episodes:
             add_to(stats, flatten(info))
@@ -270,6 +269,6 @@ def evaluate(
     for k, v in stats.items():
         stats[k] = np.mean(v)
 
-    visualize_q_accuracy(time_series_data, scatter_data, global_step, suffix, dir_suffix=env_name)
+    visualize_q_accuracy(time_series_data, global_step, suffix, dir_suffix=env_name)
 
     return stats, trajs, renders
