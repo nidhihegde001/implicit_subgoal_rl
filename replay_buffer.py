@@ -24,7 +24,9 @@ class Dataset(FrozenDict):
         self.p_aug = None
         self.return_next_actions = False
 
-        self.rng = jax.random.PRNGKey(42)
+    
+    def _init_rng(self, seed=42):
+        return jax.random.PRNGKey(seed)
 
     @classmethod
     def create(cls, freeze=True, **fields):
@@ -141,7 +143,8 @@ class Dataset(FrozenDict):
         """Apply image augmentation to the given keys."""
         padding = 3
         batch_size = len(jax.tree_util.tree_leaves(batch[keys[0]])[0])
-        self.rng, key1, key2 = jax.random.split(self.rng, 3)
+        rng = self._init_rng()
+        rng, key1, key2 = jax.random.split(rng, 3)
         crop_froms_2d = jax.random.randint(key1, (batch_size, 2), 0, 2 * padding + 1)
         zeros = jnp.zeros((batch_size, 1), dtype=jnp.int32)
         crop_froms = jnp.concatenate([crop_froms_2d, zeros], axis=1)

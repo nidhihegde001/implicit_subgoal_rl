@@ -9,6 +9,14 @@ from replay_buffer import MultiGoalReplayBuffer
 from agents import agent_dict
 from agents.sac import get_config
 
+import time
+from log_utils import setup_wandb, get_exp_name, get_flag_dict, CsvLogger
+import wandb
+
+from evaluation import evaluate
+from utils.flax_utils import save_agent
+
+
 if 'CUDA_VISIBLE_DEVICES' in os.environ:
     os.environ['EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
     os.environ['MUJOCO_EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
@@ -16,27 +24,25 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ:
 FLAGS = flags.FLAGS
 
 
-# flags.DEFINE_string('run_group', 'Debug', 'Run group.')
+flags.DEFINE_string('run_group', 'Debug', 'Run group.')
 flags.DEFINE_integer('seed', 0, 'Random seed.')
-# flags.DEFINE_string('env_name', 'cube-triple-play-singletask-task2-v0', 'Environment (dataset) name.')
-# flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
-# flags.DEFINE_string('project', 'test', 'Project name.')
+flags.DEFINE_string('env_name', 'TwoArmTransport', 'Environment (dataset) name.')
+flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
+flags.DEFINE_string('project', 'implicit_subgoal_rl', 'Project name.')
 # flags.DEFINE_integer('offline_steps', 1000000, 'Number of online steps.')
 # flags.DEFINE_integer('online_steps', 1000000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 1000000, 'Replay buffer size.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('num_init_steps', 100, 'Initial steps to fill RB')
-# flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
-# flags.DEFINE_integer('save_interval', -1, 'Save interval.')
+flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
+flags.DEFINE_integer('save_interval', -1, 'Save interval.')
 # flags.DEFINE_integer('start_training', 5000, 'when does training start')
-
 # flags.DEFINE_integer('utd_ratio', 1, "update to data ratio")
+flags.DEFINE_float('discount', 0.99, 'discount factor')
 
-# flags.DEFINE_float('discount', 0.99, 'discount factor')
-
-# flags.DEFINE_integer('eval_episodes', 50, 'Number of evaluation episodes.')
-# flags.DEFINE_integer('video_episodes', 0, 'Number of video episodes for each task.')
-# flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
+flags.DEFINE_integer('eval_episodes', 50, 'Number of evaluation episodes.')
+flags.DEFINE_integer('video_episodes', 0, 'Number of video episodes for each task.')
+flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 
 # config_flags.DEFINE_config_file('agent', 'agents/acfql.py', lock_config=False)
 
@@ -50,13 +56,36 @@ flags.DEFINE_integer('num_init_steps', 100, 'Initial steps to fill RB')
 # flags.DEFINE_float('p_aug', None, 'Probability of applying image augmentation.')
 
 
+class LoggingHelper:
+    def __init__(self, csv_loggers, wandb_logger):
+        self.csv_loggers = csv_loggers
+        self.wandb_logger = wandb_logger
+        self.first_time = time.time()
+        self.last_time = time.time()
+
+    def log(self, data, prefix, step):
+        assert prefix in self.csv_loggers, prefix
+        self.csv_loggers[prefix].log(data, step=step)
+        self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
+
 
 def main(_):
+    # random seeds
     np.random.seed(FLAGS.seed)
     random.seed(FLAGS.seed)
-    controller_config = suite.load_controller_config(default_controller="OSC_POSE")
 
-    # Manually override parameters to match your printed config
+    # set up logging
+    exp_name = get_exp_name(FLAGS.seed)
+    setup_wandb(project=FLAGS.project, group=FLAGS.run_group, name=exp_name, mode=os.environ.get("WANDB_MODE", "online"))
+    FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
+    os.makedirs(FLAGS.save_dir, exist_ok=True)
+    logger = LoggingHelper(
+        csv_loggers=None,
+        wandb_logger=wandb,
+    )
+
+    # env setup(robosuite)
+    controller_config = suite.load_controller_config(default_controller="OSC_POSE")
     controller_config.update(dict(
         control_delta=True,
         damping=1,
@@ -80,7 +109,7 @@ def main(_):
     # 2. Create the environment
     # -------------------------------
     env = suite.make(
-        env_name="TwoArmTransport",
+        env_name=FLAGS.env_name,
         robots=["Panda", "Panda"],
         env_configuration="single-arm-opposed",
         controller_configs=controller_config,
@@ -94,6 +123,7 @@ def main(_):
         render_gpu_device_id=0,
     )
 
+    # TODO: use flags to set these
     env.reward_mode = "key" # 3 sub-goals
     env.n_goals = 3
 
@@ -130,7 +160,7 @@ def main(_):
     # Hyperparameters
     # -------------------------------
     num_init_steps = FLAGS.num_init_steps       # Fill buffer with random actions first
-    total_training_steps = 200_000
+    total_training_steps = 200
     batch_size = 256
     update_after = num_init_steps  # Start gradient updates only after buffer has enough data
     update_every = 1               # Train every environment step (can increase for speed)
@@ -139,8 +169,6 @@ def main(_):
     # 1. Random rollout to fill buffer
     # -------------------------------
     obs = env.reset()
-    obs_array = np.concatenate([v.ravel() for v in obs.values()])
-
     log_step = 0
     for step in trange(num_init_steps, desc="Filling Replay Buffer with Random Policy"):
         log_step += 1
@@ -175,10 +203,10 @@ def main(_):
     print(f"Replay buffer filled with {len(replay_buffer)} transitions.")
 
 
+
     # -------------------------------
     # 2. SAC Training Loop
     # -------------------------------
-
     agent_class = agent_dict['sac']
     agent = agent_class.create(
         FLAGS.seed,
@@ -226,11 +254,36 @@ def main(_):
             agent, loss_info = agent.update(batch)
             if step % FLAGS.log_interval == 0:
                 # logger.log(loss_info, "agent info", step=log_step)
-                print(loss_info)
+                # print(loss_info)
+                for key, info in loss_info.items():
+                    logger.log(info, key, step=log_step)
+                loss_info = {}
 
         # Reset environment if terminated
         obs = next_obs if not done else env.reset()
 
+        
+        if (FLAGS.eval_interval != 0 and step % FLAGS.eval_interval == 0):
+            eval_info, _, _ = evaluate(
+                agent=agent,
+                env=env,
+                global_step=step,
+                action_dim=act_dim,
+                num_eval_episodes=FLAGS.eval_episodes,
+                num_video_episodes=FLAGS.video_episodes,
+                video_frame_skip=FLAGS.video_frame_skip,
+            )
+            logger.log(eval_info, "eval", step=log_step)
+
+        # # saving
+        # if FLAGS.save_interval > 0 and step % FLAGS.save_interval == 0:
+        #     save_agent(agent, FLAGS.save_dir, log_step)
+
+
+        # for key, csv_logger in logger.csv_loggers.items():
+        #     csv_logger.close()
+
+    save_agent(agent, FLAGS.save_dir, log_step)
     env.close()
     print("Training complete ✅")
 

@@ -64,6 +64,16 @@ def visualize_q_accuracy(time_series_data, scatter_data, global_step, suffix, di
 
     save_dir = os.path.join(save_dir, 'q_accuracy_plots', dir_suffix)
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Determine number of goals
+    n_goals = len(scatter_data[0]) if isinstance(scatter_data[0], list) else 1
+    
+    # Convert old format to new format if needed
+    if not isinstance(scatter_data[0], list):
+        scatter_data = [[s] for s in scatter_data]  # (1 subgoal)
+    
+    scatter_data = np.array(scatter_data).T
+    print("scatter data shape: ", scatter_data.shape) # (G, T)
     fig, axes = plt.subplots(2, 1, figsize=(8, 10), constrained_layout=True)
     reward_desc = "MC return-to-go (episode end)"
     fig.suptitle(f'Q-Function Accuracy Analysis ({reward_desc})\nStep {global_step} ({suffix})', fontsize=12)
@@ -86,28 +96,53 @@ def visualize_q_accuracy(time_series_data, scatter_data, global_step, suffix, di
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # Subplot 2: scatter correlation
+    # Subplot 2: scatter correlation for all goals
     ax2 = axes[1]
-    q_preds = [d[0] for d in scatter_data]
-    mc_returns = [d[1] for d in scatter_data]
-
-    ax2.scatter(q_preds, mc_returns, alpha=0.6, s=20, edgecolors='black', linewidth=0.3)
-    if q_preds and mc_returns:
-        min_val = min(min(q_preds), min(mc_returns))
-        max_val = max(max(q_preds), max(mc_returns))
-        ax2.plot([min_val, max_val], [min_val, max_val], '--', alpha=0.75, linewidth=2, label='y = x')
+    
+    # Colors for different goals
+    colors = plt.cm.tab10(np.linspace(0, 1, n_goals))
+    
+    all_q_preds = []
+    all_mc_returns = []
+    
+    for goal_idx, goal_data in enumerate(scatter_data):
+        if not goal_data:
+            continue
+            
+        # Extract Q predictions and MC returns for this goal
+        q_preds = [d[0] for d in goal_data]
+        mc_returns = [d[1] for d in goal_data]
+        
+        all_q_preds.extend(q_preds)
+        all_mc_returns.extend(mc_returns)
+        
+        # Plot scatter for this goal
+        ax2.scatter(q_preds, mc_returns, alpha=0.6, s=20, 
+                   edgecolors='black', linewidth=0.3, 
+                   color=colors[goal_idx],
+                   label=f'Goal {goal_idx}' if n_goals > 1 else None)
+    
+    # Plot diagonal reference line
+    if all_q_preds and all_mc_returns:
+        min_val = min(min(all_q_preds), min(all_mc_returns))
+        max_val = max(max(all_q_preds), max(all_mc_returns))
+        ax2.plot([min_val, max_val], [min_val, max_val], '--', 
+                alpha=0.75, linewidth=2, color='gray', label='y = x')
 
     ax2.set_title('Predicted Q vs MC Return (All Episodes)')
     ax2.set_xlabel('Predicted Q-Value')
     ax2.set_ylabel('MC Return')
-    ax2.legend()
+    if n_goals > 1:
+        ax2.legend()
     ax2.grid(True, alpha=0.3)
     ax2.set_aspect('equal', 'box')
 
-    if len(q_preds) > 1:
-        correlation = np.corrcoef(q_preds, mc_returns)[0, 1]
-        ax2.text(0.05, 0.95, f'Correlation: {correlation:.3f}', transform=ax2.transAxes,
-                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+    # Calculate and display correlation
+    if len(all_q_preds) > 1:
+        correlation = np.corrcoef(all_q_preds, all_mc_returns)[0, 1]
+        ax2.text(0.05, 0.95, f'Overall Correlation: {correlation:.3f}', 
+                transform=ax2.transAxes,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
 
     save_path = os.path.join(save_dir, f'q_accuracy_step_{global_step}_{suffix}.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -184,10 +219,10 @@ def evaluate(
             # for a in action:
             #     action_queue.append(a)
             q_pred_g = []
-            for g in agent.n_goals:
+            for g in range(agent.n_goals):
                 critic_name = f"target_critic_goal_{g}"
                 # mean of ensembles
-                q_pred = jnp.mean(agent.select(critic_name)(jax.device_put(obs[np.newaxis, ...]), 
+                q_pred = jnp.mean(agent.network.select(critic_name)(jax.device_put(obs_array[np.newaxis, ...]),  # add batch dimension
                                             jax.device_put(action)))
                 q_pred_g.append(float(q_pred))
                 
